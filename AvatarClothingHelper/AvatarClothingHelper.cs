@@ -34,19 +34,19 @@ namespace AvatarClothingHelper
 
         private static void driveSecondaryBlendshapes(Slot parent, SkinnedMeshRenderer primaryRenderer = null)
         {
-            var skinnedRenderers = parent.GetComponentsInChildren<SkinnedMeshRenderer>(renderer => renderer.BlendShapeCount > 0).ToArray();
+            var skinnedRenderers = parent.GetComponentsInChildren<SkinnedMeshRenderer>(renderer => renderer.BlendShapeWeights.Count > 0).ToArray();
 
-            primaryRenderer = primaryRenderer ?? skinnedRenderers.OrderByDescending(renderer => renderer.BlendShapeCount).First();
+            primaryRenderer = primaryRenderer ?? skinnedRenderers.OrderByDescending(renderer => renderer.BlendShapeWeights.Count).First();
 
             if (primaryRenderer.Slot.FindChild(blendshapeSyncSlotName) != null)
                 return;
 
-            foreach (var skinnedRenderer in skinnedRenderers.Where(renderer => renderer.BlendShapeWeights.Count < renderer.BlendShapeCount))
-                skinnedRenderer.BlendShapeWeights.AddRange(Enumerable.Repeat(0f, skinnedRenderer.BlendShapeCount - skinnedRenderer.BlendShapeWeights.Count));
+            foreach (var skinnedRenderer in skinnedRenderers.Where(renderer => renderer.BlendShapeWeights.Count < renderer.BlendShapeWeights.Count))
+                skinnedRenderer.BlendShapeWeights.AddRange(Enumerable.Repeat(0f, skinnedRenderer.BlendShapeWeights.Count - skinnedRenderer.BlendShapeWeights.Count));
 
             var blendshapeGroups = skinnedRenderers
                 .SelectMany(renderer =>
-                    Enumerable.Range(0, renderer.BlendShapeCount)
+                    Enumerable.Range(0, renderer.BlendShapeWeights.Count)
                     .Select(i => new Blendshape(renderer.BlendShapeName(i), renderer.BlendShapeWeights.GetElement(i), renderer == primaryRenderer)))
                 .GroupBy(blendshape => blendshape.Name)
                 .Where(group => group.Count() > 1 && group.Any(blendshape => blendshape.Primary));
