@@ -5,6 +5,11 @@ using HarmonyLib;
 using ResoniteModLoader;
 using System.Collections.Generic;
 using System.Linq;
+using System.Runtime;
+using System.Runtime.CompilerServices;
+using System.Text.RegularExpressions;
+using System.Xml.Linq;
+using static OfficialAssets.Graphics;
 
 namespace AvatarClothingHelper
 {
@@ -19,8 +24,11 @@ namespace AvatarClothingHelper
         [AutoRegisterConfigKey]
         private static ModConfigurationKey<bool> GenerateSlotPerBlendshape = new ModConfigurationKey<bool>("GenerateSlotPerBlendshape", "Generate each Blendshape ValueCopy and MultiDriver on a nested slot.", () => true);
 
-        public override string Author => "Banane9 & darbdarb";
-        public override string Link => "https://github.com/darbdarb/ResoniteAvatarClothingHelper";
+        [AutoRegisterConfigKey]
+        private static ModConfigurationKey<bool> EnableLogging = new ModConfigurationKey<bool>("EnableLogging", "Should this log?", () => true);
+
+        public override string Author => "Banane9";
+        public override string Link => "https://github.com/Banane9/ResoniteAvatarClothingHelper";
         public override string Name => "AvatarClothingHelper";
         public override string Version => "2.0.0";
 
@@ -32,22 +40,44 @@ namespace AvatarClothingHelper
             harmony.PatchAll();
         }
 
-        private static void driveSecondaryBlendshapes(Slot parent, SkinnedMeshRenderer primaryRenderer = null)
+        class DialogSettings
         {
-            var skinnedRenderers = parent.GetComponentsInChildren<SkinnedMeshRenderer>(renderer => renderer.BlendShapeWeights.Count > 0).ToArray();
+            public bool UseMeshBoneListInstead { get; set; }
+            public bool UseFindAndReplace { get; set; }
+            public bool ApplyOnDestinationInstead { get; set; }
+            public bool UseRegex { get; set; }
+            public bool IgnoreCase { get; set; } = true;
+            public bool UseTrim { get; set; } = true;
+            public string FindPattern { get; set; }
+            public string ReplacePattern { get; set; }
+        }
 
-            primaryRenderer = primaryRenderer ?? skinnedRenderers.OrderByDescending(renderer => renderer.BlendShapeWeights.Count).First();
+        private static void driveSecondaryBlendshapes(Slot parent, SkinnedMeshRenderer primaryRenderer = null, bool replaceLog = false)
+        {
+            if (replaceLog) Msg($"DOING BLENDSHAPE DRIVERS!");
+            var skinnedRenderers = parent.GetComponentsInChildren<SkinnedMeshRenderer>(renderer => renderer.MeshBlendshapeCount > 0).ToArray();
+
+            primaryRenderer = primaryRenderer ?? skinnedRenderers.OrderByDescending(renderer => renderer.MeshBlendshapeCount).First();
 
             if (primaryRenderer.Slot.FindChild(blendshapeSyncSlotName) != null)
                 return;
 
-            foreach (var skinnedRenderer in skinnedRenderers.Where(renderer => renderer.BlendShapeWeights.Count < renderer.BlendShapeWeights.Count))
-                skinnedRenderer.BlendShapeWeights.AddRange(Enumerable.Repeat(0f, skinnedRenderer.BlendShapeWeights.Count - skinnedRenderer.BlendShapeWeights.Count));
+            foreach (var skinnedRenderer in skinnedRenderers.Where(renderer => renderer.BlendShapeWeights.Count < renderer.MeshBlendshapeCount))
+                skinnedRenderer.BlendShapeWeights.AddRange(Enumerable.Repeat(0f, skinnedRenderer.MeshBlendshapeCount - skinnedRenderer.BlendShapeWeights.Count));
 
             var blendshapeGroups = skinnedRenderers
-                .SelectMany(renderer =>
-                    Enumerable.Range(0, renderer.BlendShapeWeights.Count)
-                    .Select(i => new Blendshape(renderer.BlendShapeName(i), renderer.BlendShapeWeights.GetElement(i), renderer == primaryRenderer)))
+                .SelectMany(renderer => 
+
+                    Enumerable.Range(0, renderer.MeshBlendshapeCount)
+                    .Select(i =>
+                    {
+                        string name = SanitizeForComparison(renderer.BlendShapeName(i), GetSettings(primaryRenderer));
+                        if (renderer == primaryRenderer)
+                        {
+                            name = SanitizeForComparison(PerformFindAndReplaceIfNeeded(renderer.BlendShapeName(i), GetSettings(primaryRenderer), replaceLog), GetSettings(primaryRenderer));
+                        }
+                        return new Blendshape(name, renderer.BlendShapeWeights.GetElement(i), renderer == primaryRenderer);
+                    }))
                 .GroupBy(blendshape => blendshape.Name)
                 .Where(group => group.Count() > 1 && group.Any(blendshape => blendshape.Primary));
 
@@ -83,6 +113,64 @@ namespace AvatarClothingHelper
             return objectRoot;
         }
 
+        static readonly ConditionalWeakTable<SkinnedMeshRenderer, DialogSettings> SettingsMap = [];
+
+        static DialogSettings GetSettings(SkinnedMeshRenderer instance)
+        {
+            if (SettingsMap.TryGetValue(instance, out DialogSettings settings))
+                return settings;
+
+            DialogSettings newSettings = new DialogSettings();
+            SettingsMap.Add(instance, newSettings);
+
+            return newSettings;
+        }
+
+        static string LogIfDifferent(string original, string newValue, bool shouldLog)
+        {
+            if (shouldLog)
+                Msg(
+                    original != newValue
+                        ? $"Name '{original}' was replaced with '{newValue}'"
+                        : "No replacement was done"
+                );
+            return newValue;
+        }
+
+        static string PerformFindAndReplaceIfNeeded(string name, DialogSettings settings = null, bool shouldLog = false)
+        {
+            if (settings == null) return name;
+            if (!settings.UseFindAndReplace) return name;
+
+            string find = settings.FindPattern ?? "";
+            string replace = settings.ReplacePattern ?? "";
+
+            if (shouldLog) Msg($"Performing find & replace on '{name}'");
+
+            if (!settings.UseRegex)
+            {
+                if (find == "")
+                {
+                    if (shouldLog) Msg($"Find is empty, using string.Format with '{replace}'");
+                    return LogIfDifferent(name, string.Format(replace, name), shouldLog);
+                }
+
+                if (shouldLog) Msg($"Simple find and replace with '{find}' and '{replace}'");
+                return LogIfDifferent(name, name.Replace(find, replace), shouldLog);
+            }
+
+            if (shouldLog) Msg($"RegEx replace with '{find}' and '{replace}'");
+            return LogIfDifferent(name, Regex.Replace(name, find, replace), shouldLog);
+        }
+
+        static string SanitizeForComparison(string name, DialogSettings settings)
+        {
+            if (settings == null) return name;
+            if (settings.IgnoreCase) name = name.ToLowerInvariant();
+            if (settings.UseTrim) name = name.Trim();
+            return name;
+        }
+
         [HarmonyPatch(typeof(ModelImporter))]
         private static class ModelImporterPatch
         {
@@ -92,7 +180,7 @@ namespace AvatarClothingHelper
             {
                 __result = new EnumerableInjector<Context>(__result)
                 {
-                    Postfix = () => driveSecondaryBlendshapes(targetSlot)
+                    Postfix = () => driveSecondaryBlendshapes(targetSlot, null, Config.GetValue(EnableLogging))
                 }.GetEnumerator();
             }
         }
@@ -107,24 +195,61 @@ namespace AvatarClothingHelper
                 if (!Config.GetValue(EnableInspectorButtons) || __instance.Slot.FindChild(blendshapeSyncSlotName) != null)
                     return;
 
-                var button = ui.Button("Setup as Primary Blendshape Source", colorX.Pink);
-                var button2 = ui.Button("Setup best Blendshape Source", colorX.Pink);
+                var button = ui.Button("Setup as Primary Blendshape Source", (colorX?)color.Pink);
+                var button2 = ui.Button("Setup best Blendshape Source", (colorX?)color.Pink);
 
                 var root = getObjectRoot(__instance.Slot);
 
                 button.LocalPressed += (sender, data) =>
                 {
-                    driveSecondaryBlendshapes(root, __instance);
-                    button.Slot.Destroy();
-                    button2.Slot.Destroy();
+                    driveSecondaryBlendshapes(root, __instance, Config.GetValue(EnableLogging));
                 };
 
                 button2.LocalPressed += (sender, data) =>
                 {
-                    driveSecondaryBlendshapes(root);
-                    button.Slot.Destroy();
-                    button2.Slot.Destroy();
+                    driveSecondaryBlendshapes(root, null, Config.GetValue(EnableLogging));
                 };
+
+
+
+
+                DialogSettings settings = GetSettings(__instance);
+                Slot infoHolder = ui.Empty("Info Holder");
+                ui.Checkbox("Use find and replace", settings.UseFindAndReplace).State.OnValueChange += field => settings.UseFindAndReplace = field.Value;
+                //ui.Checkbox("Off - Apply find and replace on names from clipboard or armature / On - Apply on names from this mesh", settings.ApplyOnDestinationInstead).State.OnValueChange += field => settings.ApplyOnDestinationInstead = field.Value;
+                ui.Checkbox("Use RegEx", settings.UseRegex).State.OnValueChange += field => settings.UseRegex = field.Value;
+
+                {
+                    ValueField<string> findField = infoHolder.AttachComponent<ValueField<string>>();
+
+                    const string key = "Value";
+                    SyncMemberEditorBuilder.Build(
+                        findField.GetSyncMember(key),
+                        "Find",
+                        findField.GetSyncMemberFieldInfo(key),
+                        ui
+                    );
+
+                    findField.Value.Changed += field => settings.FindPattern = (field as Sync<string>)?.Value;
+                }
+
+                {
+                    ValueField<string> replaceField = infoHolder.AttachComponent<ValueField<string>>();
+
+                    const string key = "Value";
+                    SyncMemberEditorBuilder.Build(
+                        replaceField.GetSyncMember(key),
+                        "Replace",
+                        replaceField.GetSyncMemberFieldInfo(key),
+                        ui
+                    );
+
+                    replaceField.Value.Changed += field => settings.ReplacePattern = (field as Sync<string>)?.Value;
+                }
+
+                ui.Text("See format help on github.com/TheJebForge/BoneReferenceHelper");
+                ui.Checkbox("Ignore case", settings.IgnoreCase).State.OnValueChange += field => settings.IgnoreCase = field.Value;
+                ui.Checkbox("Ignore leading and trailing whitespace", settings.UseTrim).State.OnValueChange += field => settings.UseTrim = field.Value;
             }
         }
     }
